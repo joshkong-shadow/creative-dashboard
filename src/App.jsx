@@ -507,7 +507,7 @@ export default function Dashboard() {
   const [patModalOpen, setPatModalOpen] = useState(false);
   const [categoryInspector, setCategoryInspector] = useState(null); // {dim, target} | null
 
-  const pushToGithub = async (pat) => {
+  const pushToGithub = async (pat, localStorageFailed = false) => {
     setSaveState({ status: "saving", msg: "Pushing to GitHub…" });
     const repo = "joshkong-shadow/creative-dashboard";
     const path = "data/mappings.json";
@@ -536,7 +536,7 @@ export default function Dashboard() {
       if (!put.ok) {
         const body = await put.text();
         if (put.status === 401 || put.status === 403) {
-          localStorage.removeItem("creative_dashboard_gh_pat");
+          try { localStorage.removeItem("creative_dashboard_gh_pat"); } catch {}
           setSaveState({ status: "err", msg: "Saved token rejected. Re-enter PAT." });
           setPatModalOpen(true);
           return;
@@ -545,9 +545,9 @@ export default function Dashboard() {
       }
       const res = await put.json();
       const sha7 = res.commit?.sha?.slice(0, 7) || "ok";
-      setSaveState({ status: "ok", msg: `Committed to GitHub — ${sha7}` });
-      // Blunt confirmation so the user can't miss it.
-      window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will pick them up.`);
+      const warn = localStorageFailed ? "\n\nNote: local browser cache is full (the im8-dashboard on the same origin is filling it up). Server copy is safe; you may want to clear localStorage for joshkong-shadow.github.io to re-enable caching." : "";
+      setSaveState({ status: "ok", msg: `Committed — ${sha7}${localStorageFailed ? " (local cache full)" : ""}` });
+      window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will pick them up.${warn}`);
     } catch (err) {
       console.error("[saveMappings]", err);
       const msg = err.name === "AbortError" ? "Timed out after 30s — check network / PAT and retry." : String(err).slice(0, 300);
@@ -556,21 +556,31 @@ export default function Dashboard() {
     }
   };
 
+  // Safe localStorage helpers — the origin is shared with joshkong-shadow.github.io/im8-dashboard
+  // which can fill the ~5MB quota and trigger QuotaExceededError on setItem.
+  const safeLocalSet = (key, value) => {
+    try { localStorage.setItem(key, value); return true; }
+    catch (err) { console.warn(`[localStorage full] failed to set ${key}:`, err.message); return false; }
+  };
+  const safeLocalGet = (key) => {
+    try { return localStorage.getItem(key); } catch { return null; }
+  };
+
   const saveMappings = () => {
     // Immediate visible state so the user always sees the click register, even
     // if the button handler hands off to a modal or a slow API call.
     setSaveState({ status: "saving", msg: "Saving…" });
-    localStorage.setItem("creative_dashboard_mappings", JSON.stringify(mappings));
+    const localOk = safeLocalSet("creative_dashboard_mappings", JSON.stringify(mappings));
     setSavedAt(new Date());
-    const pat = localStorage.getItem("creative_dashboard_gh_pat");
-    if (pat) pushToGithub(pat);
+    const pat = safeLocalGet("creative_dashboard_gh_pat");
+    if (pat) pushToGithub(pat, !localOk);
     else { setPatModalOpen(true); setSaveState({ status: "idle", msg: "" }); }
   };
 
   const handlePatSaved = (pat) => {
-    localStorage.setItem("creative_dashboard_gh_pat", pat.trim());
+    const stored = safeLocalSet("creative_dashboard_gh_pat", pat.trim());
     setPatModalOpen(false);
-    pushToGithub(pat);
+    pushToGithub(pat, !stored);
   };
 
   const handlePatSkipped = () => {
@@ -583,7 +593,7 @@ export default function Dashboard() {
   };
 
   const clearGithubPat = () => {
-    localStorage.removeItem("creative_dashboard_gh_pat");
+    try { localStorage.removeItem("creative_dashboard_gh_pat"); } catch {}
     setSaveState({ status: "ok", msg: "GitHub token cleared — you'll be prompted on next save." });
   };
 
