@@ -524,22 +524,35 @@ export default function Dashboard() {
       });
       if (!put.ok) {
         const body = await put.text();
-        if (put.status === 401 || put.status === 403) localStorage.removeItem("creative_dashboard_gh_pat");
+        if (put.status === 401 || put.status === 403) {
+          localStorage.removeItem("creative_dashboard_gh_pat");
+          setSaveState({ status: "err", msg: "Saved token rejected. Re-enter PAT." });
+          setPatModalOpen(true);
+          return;
+        }
         throw new Error(`${put.status}: ${body.slice(0, 200)}`);
       }
       const res = await put.json();
-      setSaveState({ status: "ok", msg: `Committed to GitHub — ${res.commit?.sha?.slice(0, 7) || "ok"}` });
+      const sha7 = res.commit?.sha?.slice(0, 7) || "ok";
+      setSaveState({ status: "ok", msg: `Committed to GitHub — ${sha7}` });
+      // Blunt confirmation so the user can't miss it.
+      window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will pick them up.`);
     } catch (err) {
-      setSaveState({ status: "err", msg: String(err).slice(0, 200) });
+      const msg = String(err).slice(0, 300);
+      setSaveState({ status: "err", msg });
+      window.alert(`Save failed: ${msg}`);
     }
   };
 
   const saveMappings = () => {
+    // Immediate visible state so the user always sees the click register, even
+    // if the button handler hands off to a modal or a slow API call.
+    setSaveState({ status: "saving", msg: "Saving…" });
     localStorage.setItem("creative_dashboard_mappings", JSON.stringify(mappings));
     setSavedAt(new Date());
     const pat = localStorage.getItem("creative_dashboard_gh_pat");
     if (pat) pushToGithub(pat);
-    else setPatModalOpen(true);
+    else { setPatModalOpen(true); setSaveState({ status: "idle", msg: "" }); }
   };
 
   const handlePatSaved = (pat) => {
@@ -894,6 +907,16 @@ function CleanupTable({ values, mappings, setMapping, selected, onSelect, onInsp
     return Array.from(set).sort((a, b) => String(a).localeCompare(String(b)));
   }, [values, mappings]);
 
+  // Reverse index: for each target, list of raw values that merge into it.
+  const mergedInto = useMemo(() => {
+    const m = {};
+    for (const [raw, target] of Object.entries(mappings)) {
+      if (!target) continue;
+      (m[target] ||= []).push(raw);
+    }
+    return m;
+  }, [mappings]);
+
   return (
     <>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -918,9 +941,15 @@ function CleanupTable({ values, mappings, setMapping, selected, onSelect, onInsp
                 <td style={{ ...td, fontFamily: "ui-monospace, monospace" }} onClick={e => e.stopPropagation()}>
                   {mapped ? (
                     <button onClick={() => onInspectCategory?.(mapped)}
-                      title="Click to see everything in this category"
+                      title="Click to see everything merged into this master category"
                       style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: 4, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
                       {mapped} ↗
+                    </button>
+                  ) : mergedInto[v.value]?.length ? (
+                    <button onClick={() => onInspectCategory?.(v.value)}
+                      title={`${mergedInto[v.value].length} value(s) merged into this master category — click to see`}
+                      style={{ background: "#e0e7ff", color: "#3730a3", padding: "2px 8px", borderRadius: 4, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "ui-monospace, monospace", fontSize: 11 }}>
+                      +{mergedInto[v.value].length} merged ↗
                     </button>
                   ) : <span style={{ color: "#cbd5e1" }}>—</span>}
                 </td>
