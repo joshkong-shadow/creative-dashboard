@@ -498,43 +498,20 @@ export default function Dashboard() {
   };
 
   const [saveState, setSaveState] = useState({ status: "idle", msg: "" }); // idle | saving | ok | err
+  const [patModalOpen, setPatModalOpen] = useState(false);
+  const [categoryInspector, setCategoryInspector] = useState(null); // {dim, target} | null
 
-  const saveMappings = async () => {
-    // Always persist locally first — cheap, instant.
-    localStorage.setItem("creative_dashboard_mappings", JSON.stringify(mappings));
-    setSavedAt(new Date());
-
-    // Prompt for / reuse PAT. Stored in localStorage so it survives reloads.
-    let pat = localStorage.getItem("creative_dashboard_gh_pat");
-    if (!pat) {
-      pat = window.prompt("Enter a GitHub Personal Access Token (classic, repo scope) to sync mappings to the repo.\n\nStored in this browser only. Leave blank to skip and just download the JSON instead.");
-      if (pat) localStorage.setItem("creative_dashboard_gh_pat", pat.trim());
-    }
-
-    if (!pat) {
-      // No token — fall back to download.
-      const blob = new Blob([JSON.stringify(mappings, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = "mappings.json"; a.click();
-      URL.revokeObjectURL(url);
-      setSaveState({ status: "ok", msg: "Downloaded mappings.json (no GitHub sync — token skipped)" });
-      return;
-    }
-
+  const pushToGithub = async (pat) => {
     setSaveState({ status: "saving", msg: "Pushing to GitHub…" });
     const repo = "joshkong-shadow/creative-dashboard";
     const path = "data/mappings.json";
     const api = `https://api.github.com/repos/${repo}/contents/${path}`;
     const headers = { Authorization: `token ${pat.trim()}`, Accept: "application/vnd.github+json" };
-
     try {
-      // Need current sha to update existing file.
       let sha;
       const head = await fetch(api, { headers });
       if (head.ok) sha = (await head.json()).sha;
       else if (head.status !== 404) throw new Error(`GET ${path}: ${head.status}`);
-
       const content = btoa(unescape(encodeURIComponent(JSON.stringify(mappings, null, 2))));
       const put = await fetch(api, {
         method: "PUT",
@@ -555,6 +532,29 @@ export default function Dashboard() {
     } catch (err) {
       setSaveState({ status: "err", msg: String(err).slice(0, 200) });
     }
+  };
+
+  const saveMappings = () => {
+    localStorage.setItem("creative_dashboard_mappings", JSON.stringify(mappings));
+    setSavedAt(new Date());
+    const pat = localStorage.getItem("creative_dashboard_gh_pat");
+    if (pat) pushToGithub(pat);
+    else setPatModalOpen(true);
+  };
+
+  const handlePatSaved = (pat) => {
+    localStorage.setItem("creative_dashboard_gh_pat", pat.trim());
+    setPatModalOpen(false);
+    pushToGithub(pat);
+  };
+
+  const handlePatSkipped = () => {
+    setPatModalOpen(false);
+    const blob = new Blob([JSON.stringify(mappings, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "mappings.json"; a.click();
+    URL.revokeObjectURL(url);
+    setSaveState({ status: "ok", msg: "Downloaded mappings.json (skipped GitHub sync)" });
   };
 
   const clearGithubPat = () => {
@@ -827,7 +827,8 @@ export default function Dashboard() {
                 <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px", color: "#334155" }}>
                   {cleanDim} — {cleanValuesForDim.length} unique values
                 </h3>
-                <CleanupTable values={cleanValuesForDim} mappings={mappings[cleanDim] || {}} setMapping={(o, n) => setMapping(cleanDim, o, n)} selected={cleanSelectedValue} onSelect={setCleanSelectedValue} />
+                <CleanupTable values={cleanValuesForDim} mappings={mappings[cleanDim] || {}} setMapping={(o, n) => setMapping(cleanDim, o, n)} selected={cleanSelectedValue} onSelect={setCleanSelectedValue}
+                  onInspectCategory={(target) => setCategoryInspector({ dim: cleanDim, target })} />
               </div>
 
               {cleanSelectedValue && (
@@ -857,12 +858,23 @@ export default function Dashboard() {
       </div>
 
       <AdListModal open={modalState.open} title={modalState.title} subtitle={modalState.subtitle} ads={modalState.ads} onClose={closeModal} />
+      <PatModal open={patModalOpen} onSave={handlePatSaved} onSkip={handlePatSkipped} onClose={() => setPatModalOpen(false)} />
+      {categoryInspector && (
+        <CategoryMembersModal
+          dim={categoryInspector.dim}
+          target={categoryInspector.target}
+          mappings={mappings}
+          values={dimensionValues(manifest?.ads ?? [], categoryInspector.dim)}
+          onRemove={(raw) => setMapping(categoryInspector.dim, raw, "")}
+          onClose={() => setCategoryInspector(null)}
+        />
+      )}
     </div>
   );
 }
 
 // -------- Cleanup table subcomponent (sortable, clickable, Edit-popover) --------
-function CleanupTable({ values, mappings, setMapping, selected, onSelect }) {
+function CleanupTable({ values, mappings, setMapping, selected, onSelect, onInspectCategory }) {
   const [sort, setSort] = useState({ col: "spend", dir: "desc" });
   const [editingValue, setEditingValue] = useState(null);
 
@@ -903,9 +915,13 @@ function CleanupTable({ values, mappings, setMapping, selected, onSelect }) {
                 <td style={{ ...td, fontFamily: "ui-monospace, monospace" }}>{v.value}</td>
                 <td style={{ ...td, textAlign: "right", color: "#64748b" }}>{fmtNum(v.n)}</td>
                 <td style={{ ...td, textAlign: "right" }}>{fmt(v.spend)}</td>
-                <td style={{ ...td, fontFamily: "ui-monospace, monospace" }}>
+                <td style={{ ...td, fontFamily: "ui-monospace, monospace" }} onClick={e => e.stopPropagation()}>
                   {mapped ? (
-                    <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: 4, fontWeight: 600 }}>{mapped}</span>
+                    <button onClick={() => onInspectCategory?.(mapped)}
+                      title="Click to see everything in this category"
+                      style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: 4, fontWeight: 600, border: "none", cursor: "pointer", fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
+                      {mapped} ↗
+                    </button>
                   ) : <span style={{ color: "#cbd5e1" }}>—</span>}
                 </td>
                 <td style={{ ...td, textAlign: "right" }} onClick={e => e.stopPropagation()}>
@@ -935,6 +951,99 @@ function CleanupTable({ values, mappings, setMapping, selected, onSelect }) {
         />
       )}
     </>
+  );
+}
+
+// -------- GitHub PAT entry modal (replaces window.prompt which Pages can block) --------
+function PatModal({ open, onSave, onSkip, onClose }) {
+  const [pat, setPat] = useState("");
+  if (!open) return null;
+  const submit = () => { if (pat.trim()) onSave(pat); };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 2100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 10, width: 480, boxShadow: "0 20px 40px rgba(0,0,0,0.2)" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid #e2e8f0" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>Sync mappings to GitHub</div>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>Paste a GitHub Personal Access Token to push <code>data/mappings.json</code> to the repo. Stored in this browser only.</div>
+        </div>
+        <div style={{ padding: "14px 18px" }}>
+          <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 11, color: "#2563eb", textDecoration: "none", fontWeight: 600 }}>Create a fine-grained PAT (repo contents: R&W) →</a>
+          <input
+            type="password"
+            autoFocus
+            value={pat}
+            onChange={e => setPat(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submit(); }}
+            placeholder="github_pat_... or ghp_..."
+            style={{ width: "100%", marginTop: 10, padding: "8px 10px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, fontFamily: "ui-monospace, monospace" }}
+          />
+          <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 6 }}>Token stays in localStorage. Clear it anytime via the ⚙ button on the Data Clean Up tab.</div>
+        </div>
+        <div style={{ padding: "12px 18px", borderTop: "1px solid #e2e8f0", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={onSkip}
+            style={{ padding: "6px 12px", border: "1px solid #d1d5db", background: "#fff", color: "#64748b", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+            Skip (download JSON)
+          </button>
+          <button onClick={submit} disabled={!pat.trim()}
+            style={{ padding: "6px 14px", border: "none", background: pat.trim() ? "#0f172a" : "#cbd5e1", color: "#fff", borderRadius: 6, cursor: pat.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600 }}>
+            Save & push to GitHub
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -------- Category members modal — shows all raw values currently resolving to a target --------
+function CategoryMembersModal({ dim, target, mappings, values, onRemove, onClose }) {
+  const dimMappings = mappings[dim] || {};
+  // Members = raw values explicitly mapped to this target, plus the target itself if it's a native raw value.
+  const members = useMemo(() => {
+    const mapped = Object.entries(dimMappings).filter(([, t]) => t === target).map(([raw]) => raw);
+    const self = values.find(v => v.value === target) && !dimMappings[target] ? [target] : [];
+    const all = [...new Set([...self, ...mapped])];
+    return all.map(raw => {
+      const stat = values.find(v => v.value === raw);
+      return { raw, n: stat?.n ?? 0, spend: stat?.spend ?? 0, isSelf: raw === target && !dimMappings[raw] };
+    }).sort((a, b) => b.spend - a.spend);
+  }, [dim, target, mappings, values, dimMappings]);
+  const totals = members.reduce((a, m) => ({ n: a.n + m.n, spend: a.spend + m.spend }), { n: 0, spend: 0 });
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 2050, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 10, width: 520, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 40px rgba(0,0,0,0.2)" }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e2e8f0" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3 }}>Master category · {dim}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", fontFamily: "ui-monospace, monospace" }}>{target}</div>
+          <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{members.length} member{members.length !== 1 ? "s" : ""} · {fmtNum(totals.n)} ads · {fmt(totals.spend)}</div>
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {members.map(m => (
+            <div key={m.raw} style={{ display: "flex", alignItems: "center", padding: "8px 14px", borderBottom: "1px solid #f1f5f9", gap: 10 }}>
+              <div style={{ flex: 1, fontFamily: "ui-monospace, monospace", fontSize: 12 }}>
+                {m.raw}
+                {m.isSelf && <span style={{ marginLeft: 6, fontSize: 9, color: "#64748b", background: "#f1f5f9", padding: "1px 5px", borderRadius: 3 }}>CANONICAL</span>}
+              </div>
+              <div style={{ fontSize: 11, color: "#64748b", minWidth: 60, textAlign: "right" }}>{fmtNum(m.n)}</div>
+              <div style={{ fontSize: 11, color: "#334155", minWidth: 70, textAlign: "right", fontWeight: 500 }}>{fmt(m.spend)}</div>
+              {!m.isSelf && (
+                <button onClick={() => onRemove(m.raw)} title="Remove this mapping"
+                  style={{ border: "1px solid #fecaca", background: "#fff", color: "#dc2626", borderRadius: 4, cursor: "pointer", fontSize: 10, padding: "2px 6px", fontWeight: 600 }}>
+                  Unmap
+                </button>
+              )}
+            </div>
+          ))}
+          {members.length === 0 && <div style={{ padding: 20, textAlign: "center", fontSize: 11, color: "#94a3b8" }}>No members yet</div>}
+        </div>
+        <div style={{ padding: "10px 14px", borderTop: "1px solid #e2e8f0", display: "flex", justifyContent: "flex-end" }}>
+          <button onClick={onClose}
+            style={{ padding: "6px 14px", border: "none", background: "#0f172a", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
