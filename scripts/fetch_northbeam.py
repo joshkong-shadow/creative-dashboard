@@ -101,7 +101,7 @@ def submit_export(start_iso: str, end_iso: str) -> str:
             "period_ending_at": end_iso,
         },
         "breakdowns": [{"key": "Platform (Northbeam)", "values": PLATFORMS}],
-        "options": {"remove_zero_spend": True},
+        "options": {"remove_zero_spend": True, "include_ids": True},
         "attribution_options": {
             "attribution_models": [ATTRIBUTION_MODEL],
             "attribution_windows": [ATTRIBUTION_WINDOW],
@@ -187,6 +187,10 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
             "new_visits": _safe_float(row.get("new_visits")) or 0.0,
         }
 
+        ad_id = (row.get("ad_id") or "").strip()
+        # Only keep numeric platform ad IDs (Meta ad IDs) — UTM kind rows echo ad_name here.
+        meta_ad_id = ad_id if ad_id.isdigit() else None
+
         if dedup in by_ad:
             agg = by_ad[dedup]
             for k, v in metrics.items():
@@ -194,12 +198,15 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
             # Track all Meta ad IDs that roll up into this dedup.
             agg["meta_campaigns"].add(row.get("campaign_name", ""))
             agg["meta_adsets"].add(row.get("adset_name", ""))
+            if meta_ad_id:
+                agg["meta_ad_ids"].add(meta_ad_id)
         else:
             by_ad[dedup] = {
                 **parsed,
                 "metrics": metrics,
                 "meta_campaigns": {row.get("campaign_name", "")},
                 "meta_adsets": {row.get("adset_name", "")},
+                "meta_ad_ids": {meta_ad_id} if meta_ad_id else set(),
             }
 
     # Compute derived metrics and apply mappings.
@@ -222,6 +229,7 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
 
         rec["meta_campaigns"] = sorted(rec["meta_campaigns"])
         rec["meta_adsets"] = sorted(rec["meta_adsets"])
+        rec["meta_ad_ids"] = sorted(rec["meta_ad_ids"])
         out.append(rec)
 
     return out

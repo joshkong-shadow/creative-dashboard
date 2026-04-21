@@ -26,6 +26,38 @@ const RoasBadge = ({ roas }) => {
 const th = { padding: "8px 10px", color: "#64748b", fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.3 };
 const td = { padding: "8px 10px", color: "#334155", fontSize: 12 };
 
+// Convert YYMMDD ↔ YYYY-MM-DD for <input type="date"> round-trips.
+const yymmddToIso = (s) => s && /^\d{6}$/.test(s) ? `20${s.slice(0, 2)}-${s.slice(2, 4)}-${s.slice(4, 6)}` : "";
+const isoToYymmdd = (s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.slice(2, 4) + s.slice(5, 7) + s.slice(8, 10) : null;
+
+// Creation-date range picker shown above the tabs.
+function DateRangePicker({ bounds, start, end, setStart, setEnd }) {
+  if (!bounds) return null;
+  const minIso = yymmddToIso(bounds.min);
+  const maxIso = yymmddToIso(bounds.max);
+  const isFiltered = start || end;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, padding: "10px 14px", background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, flexWrap: "wrap" }}>
+      <div style={{ fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3 }}>Ad creation date</div>
+      <input type="date" value={yymmddToIso(start) || minIso} min={minIso} max={maxIso}
+        onChange={e => setStart(isoToYymmdd(e.target.value))}
+        style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, color: "#334155" }} />
+      <span style={{ color: "#94a3b8", fontSize: 12 }}>→</span>
+      <input type="date" value={yymmddToIso(end) || maxIso} min={minIso} max={maxIso}
+        onChange={e => setEnd(isoToYymmdd(e.target.value))}
+        style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, color: "#334155" }} />
+      {isFiltered && (
+        <button onClick={() => { setStart(null); setEnd(null); }}
+          style={{ padding: "4px 10px", border: "1px solid #d1d5db", background: "#fff", color: "#64748b", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 600 }}>Reset</button>
+      )}
+      <span title="Filters ads by the date encoded in the ad name (YYMMDD). This is the creative's birthdate — not the activity window. Spend/revenue shown are lifetime totals for ads created in this range."
+        style={{ marginLeft: "auto", fontSize: 10, color: "#94a3b8", cursor: "help", fontStyle: "italic" }}>
+        ⓘ Filters by ad creation date, not activity — spend shown is lifetime for ads in this range
+      </span>
+    </div>
+  );
+}
+
 // Sortable header that cycles through desc → asc → none on click.
 function SortHeader({ label, col, sort, setSort, align = "right" }) {
   const active = sort.col === col;
@@ -124,6 +156,7 @@ function AdListModal({ open, title, subtitle, ads, onClose }) {
             <thead style={{ position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
               <tr style={{ borderBottom: "2px solid #e2e8f0" }}>
                 <SortHeader label="Ad Name" col="ad_name" sort={sort} setSort={setSort} align="left" />
+                <th style={{ ...th, textAlign: "center" }}>Preview</th>
                 <SortHeader label="Spend" col="spend" sort={sort} setSort={setSort} />
                 <SortHeader label="Revenue" col="rev" sort={sort} setSort={setSort} />
                 <SortHeader label="ROAS" col="roas" sort={sort} setSort={setSort} />
@@ -135,9 +168,19 @@ function AdListModal({ open, title, subtitle, ads, onClose }) {
             <tbody>
               {sortedAds.slice(0, 500).map((a, i) => {
                 const pctNew = a.metrics.visits ? (a.metrics.new_visits / a.metrics.visits) * 100 : null;
+                const adIds = a.meta_ad_ids || [];
                 return (
                   <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
                     <td style={{ ...td, fontSize: 10, fontFamily: "ui-monospace, monospace", maxWidth: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.ad_name}>{a.ad_name}</td>
+                    <td style={{ ...td, textAlign: "center" }}>
+                      {adIds.length > 0 ? (
+                        <a href={`https://www.facebook.com/ads/library/?id=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
+                          title={adIds.length > 1 ? `${adIds.length} Meta ad IDs — opens first` : `Meta ad ID: ${adIds[0]}`}
+                          style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
+                          View{adIds.length > 1 ? ` (${adIds.length})` : ""} ↗
+                        </a>
+                      ) : <span style={{ color: "#cbd5e1", fontSize: 10 }}>—</span>}
+                    </td>
                     <td style={{ ...td, textAlign: "right" }}>{fmt(a.metrics.spend)}</td>
                     <td style={{ ...td, textAlign: "right" }}>{fmt(a.metrics.meta_rev)}</td>
                     <td style={{ ...td, textAlign: "right" }}><RoasBadge roas={a.metrics.roas} /></td>
@@ -207,7 +250,7 @@ function BreakdownTable({ rows, nameLabel = "Name", onRowClick }) {
 
 // --------- Win Rate table with sortable columns ---------
 function WinRateTable({ wrData }) {
-  const [sort, setSort] = useState({ col: "month", dir: "asc" });
+  const [sort, setSort] = useState({ col: "month", dir: "desc" });
   const { total, rows } = useMemo(() => {
     const total = wrData.find(r => r.month === "TOTAL");
     const rest = wrData.filter(r => r.month !== "TOTAL");
@@ -308,6 +351,10 @@ export default function Dashboard() {
   const [cleanSelectedValue, setCleanSelectedValue] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
 
+  // Creation-date filter. Null = "full range"; otherwise YYMMDD strings.
+  const [dateStart, setDateStart] = useState(null);
+  const [dateEnd, setDateEnd] = useState(null);
+
   // Global modal state (shared across tabs)
   const [modalState, setModalState] = useState({ open: false, title: "", subtitle: "", ads: [] });
   const openModal = (title, subtitle, ads) => setModalState({ open: true, title, subtitle, ads });
@@ -328,9 +375,24 @@ export default function Dashboard() {
     } catch {}
   }, []);
 
-  // Apply mappings to ads (rename dimension values based on user's cleanup).
+  // Bounds of ad creation dates in the raw data (YYMMDD strings).
+  const dateBounds = useMemo(() => {
+    const dates = (manifest?.ads ?? []).map(a => a.date).filter(d => d && /^\d{6}$/.test(d));
+    if (!dates.length) return null;
+    return { min: dates.reduce((a, b) => a < b ? a : b), max: dates.reduce((a, b) => a > b ? a : b) };
+  }, [manifest]);
+
+  // Apply mappings + creation-date filter to ads.
   const ads = useMemo(() => {
-    const raw = manifest?.ads ?? [];
+    let raw = manifest?.ads ?? [];
+    if (dateStart || dateEnd) {
+      raw = raw.filter(a => {
+        if (!a.date || !/^\d{6}$/.test(a.date)) return false;
+        if (dateStart && a.date < dateStart) return false;
+        if (dateEnd && a.date > dateEnd) return false;
+        return true;
+      });
+    }
     if (!Object.keys(mappings).length) return raw;
     return raw.map(a => {
       const copy = { ...a };
@@ -339,7 +401,7 @@ export default function Dashboard() {
       }
       return copy;
     });
-  }, [manifest, mappings]);
+  }, [manifest, mappings, dateStart, dateEnd]);
 
   const totals = useMemo(() => aggregate(ads), [ads]);
   const monthlyData = useMemo(() => monthly(ads), [ads]);
@@ -477,9 +539,17 @@ export default function Dashboard() {
         <p style={{ color: "#64748b", fontSize: 13, margin: "4px 0 4px" }}>
           {manifest.period.start.slice(0, 10)} → {manifest.period.end.slice(0, 10)} · {ads.length.toLocaleString()} unique ads · Attribution: {manifest.attribution.primary}
         </p>
-        <p style={{ color: "#94a3b8", fontSize: 11, margin: "0 0 20px" }}>
+        <p style={{ color: "#94a3b8", fontSize: 11, margin: "0 0 12px" }}>
           Last refreshed: {new Date(manifest.generated_at).toLocaleString()} · {Object.keys(mappings).length} dims mapped
         </p>
+
+        <DateRangePicker
+          bounds={dateBounds}
+          start={dateStart}
+          end={dateEnd}
+          setStart={setDateStart}
+          setEnd={setDateEnd}
+        />
 
         <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#e2e8f0", borderRadius: 8, padding: 3, overflowX: "auto" }}>
           {TABS.map(t => (
