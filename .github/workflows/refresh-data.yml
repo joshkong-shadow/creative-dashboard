@@ -2,8 +2,10 @@ name: Refresh Northbeam data
 
 on:
   schedule:
-    # 8am / 12pm / 4pm / 8pm MYT (UTC+8) = 00:00 / 04:00 / 08:00 / 12:00 UTC
-    - cron: '0 0,4,8,12 * * *'
+    # 9am / 1pm / 5pm / 11pm MYT (UTC+8) = 01:00 / 05:00 / 09:00 / 15:00 UTC.
+    # Offset 2h from the sibling im8-dashboard cron (23/03/07/13 UTC) so the
+    # two never race the Meta Marketing API even with GitHub's ~1.5h cron delay.
+    - cron: '0 1,5,9,15 * * *'
   workflow_dispatch:
 
 permissions:
@@ -27,6 +29,8 @@ jobs:
         env:
           NORTHBEAM_API_KEY: ${{ secrets.NORTHBEAM_API_KEY }}
           NORTHBEAM_CLIENT_ID: ${{ secrets.NORTHBEAM_CLIENT_ID }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
         run: python scripts/fetch_northbeam.py
 
       - name: Commit refreshed data

@@ -241,6 +241,40 @@ def load_mappings(path: pathlib.Path) -> dict:
     return json.loads(path.read_text())
 
 
+def fetch_meta_previews(token: str, account_id: str) -> dict:
+    """Page through Meta's ad account returning {ad_id: preview_shareable_link}.
+
+    Uses the account-level /ads endpoint which supports high paging limits, so
+    ~26k ads come back in ~50 calls. `preview_shareable_link` is a public fb.me
+    short URL that renders the creative with no Meta login required.
+    """
+    if not token or not account_id:
+        print("  (Meta preview enrichment skipped — token or account id missing)")
+        return {}
+    base = "https://graph.facebook.com/v21.0"
+    previews: dict[str, str] = {}
+    url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&access_token={token}"
+    pages = 0
+    while url:
+        try:
+            with urlreq.urlopen(url, timeout=60) as r:
+                body = json.loads(r.read().decode())
+        except HTTPError as e:
+            print(f"  Meta API {e.code}: {e.read().decode()[:200]}")
+            break
+        for entry in body.get("data", []):
+            ad_id = entry.get("id")
+            link = entry.get("preview_shareable_link")
+            if ad_id and link:
+                previews[ad_id] = link
+        pages += 1
+        url = body.get("paging", {}).get("next")
+        if pages % 10 == 0:
+            print(f"  …{pages} pages, {len(previews)} previews so far")
+    print(f"  Meta previews: {len(previews)} fetched across {pages} pages")
+    return previews
+
+
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     out_dir = repo_root / "public" / "data"
@@ -270,6 +304,21 @@ def main():
     print("Parsing & aggregating…")
     ads = aggregate_rows(csv_text, mappings=mappings)
     print(f"  {len(ads)} unique ads")
+
+    print("Enriching with Meta ad previews…")
+    meta_token = os.environ.get("META_ACCESS_TOKEN", "")
+    meta_account = os.environ.get("META_AD_ACCOUNT_ID", "")
+    previews = fetch_meta_previews(meta_token, meta_account)
+    if previews:
+        attached = 0
+        for ad in ads:
+            links = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
+            if links:
+                ad["preview_link"] = links[0]
+                if len(links) > 1:
+                    ad["preview_links_all"] = links
+                attached += 1
+        print(f"  attached preview_link to {attached}/{len(ads)} ads")
 
     manifest = {
         "generated_at": now.isoformat(),

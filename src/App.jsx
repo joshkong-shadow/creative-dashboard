@@ -173,19 +173,18 @@ function AdListModal({ open, title, subtitle, ads, onClose }) {
                   <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
                     <td style={{ ...td, fontSize: 10, fontFamily: "ui-monospace, monospace", maxWidth: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.ad_name}>{a.ad_name}</td>
                     <td style={{ ...td, textAlign: "center" }}>
-                      {adIds.length > 0 ? (
-                        <div style={{ display: "flex", gap: 6, justifyContent: "center", whiteSpace: "nowrap" }}>
-                          <a href={`https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
-                            title={`Open in Ads Manager (Meta login required)${adIds.length > 1 ? ` · ${adIds.length} ad IDs — opens first` : ""}\nAd ID: ${adIds[0]}`}
-                            style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
-                            Manager{adIds.length > 1 ? ` (${adIds.length})` : ""} ↗
-                          </a>
-                          <a href={`https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&id=${adIds[0]}&search_type=keyword_unordered&media_type=all`} target="_blank" rel="noopener noreferrer"
-                            title="Open in public Ads Library (only works for political / social-issue ads in most regions)"
-                            style={{ color: "#94a3b8", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
-                            Lib ↗
-                          </a>
-                        </div>
+                      {a.preview_link ? (
+                        <a href={a.preview_link} target="_blank" rel="noopener noreferrer"
+                          title={`Preview the creative (no login). Meta ad ID: ${adIds[0] || "?"}`}
+                          style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
+                          Preview ↗
+                        </a>
+                      ) : adIds.length > 0 ? (
+                        <a href={`https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
+                          title={`Open in Ads Manager (Meta login required). Ad ID: ${adIds[0]}`}
+                          style={{ color: "#94a3b8", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
+                          Manager ↗
+                        </a>
                       ) : <span style={{ color: "#cbd5e1", fontSize: 10 }}>—</span>}
                     </td>
                     <td style={{ ...td, textAlign: "right" }}>{fmt(a.metrics.spend)}</td>
@@ -514,21 +513,26 @@ export default function Dashboard() {
     const path = "data/mappings.json";
     const api = `https://api.github.com/repos/${repo}/contents/${path}`;
     const headers = { Authorization: `token ${pat.trim()}`, Accept: "application/vnd.github+json" };
+    // Every fetch gets a 30s AbortController so nothing hangs silently.
+    const withTimeout = (ms) => { const c = new AbortController(); const t = setTimeout(() => c.abort(), ms); return { signal: c.signal, done: () => clearTimeout(t) }; };
     try {
       let sha;
-      const head = await fetch(api, { headers });
+      const t1 = withTimeout(30000);
+      const head = await fetch(api, { headers, signal: t1.signal }); t1.done();
       if (head.ok) sha = (await head.json()).sha;
       else if (head.status !== 404) throw new Error(`GET ${path}: ${head.status}`);
       const content = btoa(unescape(encodeURIComponent(JSON.stringify(mappings, null, 2))));
+      const t2 = withTimeout(30000);
       const put = await fetch(api, {
         method: "PUT",
         headers: { ...headers, "Content-Type": "application/json" },
+        signal: t2.signal,
         body: JSON.stringify({
           message: `chore(mappings): update via dashboard @ ${new Date().toISOString()}`,
           content,
           ...(sha ? { sha } : {}),
         }),
-      });
+      }); t2.done();
       if (!put.ok) {
         const body = await put.text();
         if (put.status === 401 || put.status === 403) {
@@ -545,7 +549,8 @@ export default function Dashboard() {
       // Blunt confirmation so the user can't miss it.
       window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will pick them up.`);
     } catch (err) {
-      const msg = String(err).slice(0, 300);
+      console.error("[saveMappings]", err);
+      const msg = err.name === "AbortError" ? "Timed out after 30s — check network / PAT and retry." : String(err).slice(0, 300);
       setSaveState({ status: "err", msg });
       window.alert(`Save failed: ${msg}`);
     }
