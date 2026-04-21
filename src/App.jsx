@@ -374,11 +374,13 @@ export default function Dashboard() {
       })
       .then(setManifest)
       .catch(e => setError(String(e)));
-    // Load saved mappings from localStorage.
-    try {
-      const saved = localStorage.getItem("creative_dashboard_mappings");
-      if (saved) setMappings(JSON.parse(saved));
-    } catch {}
+    // Mappings are owned by GitHub (data/mappings.json) — fetch fresh every
+    // load. The cache-buster prevents raw.githubusercontent.com's ~5 min CDN
+    // cache from serving stale data right after a Save.
+    fetch(`https://raw.githubusercontent.com/joshkong-shadow/creative-dashboard/main/data/mappings.json?t=${Date.now()}`)
+      .then(r => r.ok ? r.json() : {})
+      .then(m => setMappings(m || {}))
+      .catch(() => setMappings({}));
   }, []);
 
   // Bounds of ad creation dates in the raw data (YYMMDD strings).
@@ -507,7 +509,7 @@ export default function Dashboard() {
   const [patModalOpen, setPatModalOpen] = useState(false);
   const [categoryInspector, setCategoryInspector] = useState(null); // {dim, target} | null
 
-  const pushToGithub = async (pat, localStorageFailed = false) => {
+  const pushToGithub = async (pat) => {
     setSaveState({ status: "saving", msg: "Pushing to GitHub…" });
     const repo = "joshkong-shadow/creative-dashboard";
     const path = "data/mappings.json";
@@ -545,9 +547,8 @@ export default function Dashboard() {
       }
       const res = await put.json();
       const sha7 = res.commit?.sha?.slice(0, 7) || "ok";
-      const warn = localStorageFailed ? "\n\nNote: local browser cache is full (the im8-dashboard on the same origin is filling it up). Server copy is safe; you may want to clear localStorage for joshkong-shadow.github.io to re-enable caching." : "";
-      setSaveState({ status: "ok", msg: `Committed — ${sha7}${localStorageFailed ? " (local cache full)" : ""}` });
-      window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will pick them up.${warn}`);
+      setSaveState({ status: "ok", msg: `Committed — ${sha7}` });
+      window.alert(`✓ Mappings pushed to GitHub (commit ${sha7}). Next data refresh will re-apply them to latest.json.`);
     } catch (err) {
       console.error("[saveMappings]", err);
       const msg = err.name === "AbortError" ? "Timed out after 30s — check network / PAT and retry." : String(err).slice(0, 300);
@@ -570,17 +571,16 @@ export default function Dashboard() {
     // Immediate visible state so the user always sees the click register, even
     // if the button handler hands off to a modal or a slow API call.
     setSaveState({ status: "saving", msg: "Saving…" });
-    const localOk = safeLocalSet("creative_dashboard_mappings", JSON.stringify(mappings));
     setSavedAt(new Date());
     const pat = safeLocalGet("creative_dashboard_gh_pat");
-    if (pat) pushToGithub(pat, !localOk);
+    if (pat) pushToGithub(pat);
     else { setPatModalOpen(true); setSaveState({ status: "idle", msg: "" }); }
   };
 
   const handlePatSaved = (pat) => {
-    const stored = safeLocalSet("creative_dashboard_gh_pat", pat.trim());
+    safeLocalSet("creative_dashboard_gh_pat", pat.trim());
     setPatModalOpen(false);
-    pushToGithub(pat, !stored);
+    pushToGithub(pat);
   };
 
   const handlePatSkipped = () => {
