@@ -261,7 +261,8 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     base = "https://graph.facebook.com/v21.0"
     # Default /ads only returns active-ish ads; explicitly request every state
     # so historical/archived ads come back too.
-    statuses = '["ACTIVE","PAUSED","DELETED","PENDING_REVIEW","DISAPPROVED","PREAPPROVED","PENDING_BILLING_INFO","CAMPAIGN_PAUSED","ARCHIVED","ADSET_PAUSED","IN_PROCESS","WITH_ISSUES"]'
+    # Note: DELETED is rejected by Meta (Cannot request deleted objects).
+    statuses = '["ACTIVE","PAUSED","PENDING_REVIEW","DISAPPROVED","PREAPPROVED","PENDING_BILLING_INFO","CAMPAIGN_PAUSED","ARCHIVED","ADSET_PAUSED","IN_PROCESS","WITH_ISSUES"]'
     from urllib.parse import quote
     url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&effective_status={quote(statuses)}&access_token={token}"
     pages = 0
