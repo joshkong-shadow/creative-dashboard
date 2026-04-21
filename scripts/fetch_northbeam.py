@@ -241,38 +241,68 @@ def load_mappings(path: pathlib.Path) -> dict:
     return json.loads(path.read_text())
 
 
-def fetch_meta_previews(token: str, account_id: str) -> dict:
-    """Page through Meta's ad account returning {ad_id: preview_shareable_link}.
+def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -> dict:
+    """Return {ad_id: preview_shareable_link}, starting from `cache` and topping
+    up with missing ids from Meta's Graph API.
 
-    Uses the account-level /ads endpoint which supports high paging limits, so
-    ~26k ads come back in ~50 calls. `preview_shareable_link` is a public fb.me
-    short URL that renders the creative with no Meta login required.
+    Uses the account-level /ads endpoint with pagination (limit=500). Stops
+    early once every id in `needed` is covered. Gracefully returns the cache
+    on rate-limit / network failures so future runs can retry without losing
+    the links we already have.
     """
+    result = dict(cache)
+    missing = needed - set(result.keys())
+    if not missing:
+        print(f"  Meta previews: cache covers all {len(needed)} ads — no API call needed")
+        return result
     if not token or not account_id:
-        print("  (Meta preview enrichment skipped — token or account id missing)")
-        return {}
+        print(f"  (Meta preview enrichment: {len(missing)} missing — token/account id not set, keeping cache)")
+        return result
     base = "https://graph.facebook.com/v21.0"
-    previews: dict[str, str] = {}
     url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&access_token={token}"
     pages = 0
-    while url:
+    fetched = 0
+    while url and missing:
         try:
             with urlreq.urlopen(url, timeout=60) as r:
                 body = json.loads(r.read().decode())
         except HTTPError as e:
-            print(f"  Meta API {e.code}: {e.read().decode()[:200]}")
+            print(f"  Meta API {e.code} — keeping {len(result)} cached previews: {e.read().decode()[:200]}")
+            break
+        except Exception as e:
+            print(f"  Meta API error — keeping cache: {type(e).__name__}: {e}")
             break
         for entry in body.get("data", []):
             ad_id = entry.get("id")
             link = entry.get("preview_shareable_link")
-            if ad_id and link:
-                previews[ad_id] = link
+            if ad_id and link and ad_id not in result:
+                result[ad_id] = link
+                missing.discard(ad_id)
+                fetched += 1
         pages += 1
         url = body.get("paging", {}).get("next")
         if pages % 10 == 0:
-            print(f"  …{pages} pages, {len(previews)} previews so far")
-    print(f"  Meta previews: {len(previews)} fetched across {pages} pages")
-    return previews
+            print(f"  …{pages} pages, {fetched} new previews, {len(missing)} still missing")
+    print(f"  Meta previews: {fetched} fetched across {pages} pages, {len(result)} total ({len(missing)} still missing)")
+    return result
+
+
+def load_previews_cache(path: pathlib.Path) -> dict:
+    """Rebuild the ad_id→preview_link map from the previous manifest."""
+    if not path.exists():
+        return {}
+    try:
+        prev = json.loads(path.read_text())
+    except Exception:
+        return {}
+    cache = {}
+    for ad in prev.get("ads", []):
+        link = ad.get("preview_link")
+        if not link:
+            continue
+        for meta_id in ad.get("meta_ad_ids", []) or []:
+            cache[meta_id] = link
+    return cache
 
 
 def main():
@@ -308,17 +338,19 @@ def main():
     print("Enriching with Meta ad previews…")
     meta_token = os.environ.get("META_ACCESS_TOKEN", "")
     meta_account = os.environ.get("META_AD_ACCOUNT_ID", "")
-    previews = fetch_meta_previews(meta_token, meta_account)
-    if previews:
-        attached = 0
-        for ad in ads:
-            links = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
-            if links:
-                ad["preview_link"] = links[0]
-                if len(links) > 1:
-                    ad["preview_links_all"] = links
-                attached += 1
-        print(f"  attached preview_link to {attached}/{len(ads)} ads")
+    cache = load_previews_cache(out_dir / "latest.json")
+    needed = {mid for ad in ads for mid in (ad.get("meta_ad_ids") or [])}
+    print(f"  cache has {len(cache)} links, {len(needed)} unique ad_ids in this refresh")
+    previews = fetch_meta_previews(meta_token, meta_account, needed, cache)
+    attached = 0
+    for ad in ads:
+        links = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
+        if links:
+            ad["preview_link"] = links[0]
+            if len(links) > 1:
+                ad["preview_links_all"] = links
+            attached += 1
+    print(f"  attached preview_link to {attached}/{len(ads)} ads")
 
     manifest = {
         "generated_at": now.isoformat(),
