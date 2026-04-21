@@ -259,7 +259,11 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
         print(f"  (Meta preview enrichment: {len(missing)} missing — token/account id not set, keeping cache)")
         return result
     base = "https://graph.facebook.com/v21.0"
-    url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&access_token={token}"
+    # Default /ads only returns active-ish ads; explicitly request every state
+    # so historical/archived ads come back too.
+    statuses = '["ACTIVE","PAUSED","DELETED","PENDING_REVIEW","DISAPPROVED","PREAPPROVED","PENDING_BILLING_INFO","CAMPAIGN_PAUSED","ARCHIVED","ADSET_PAUSED","IN_PROCESS","WITH_ISSUES"]'
+    from urllib.parse import quote
+    url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&effective_status={quote(statuses)}&access_token={token}"
     pages = 0
     fetched = 0
     while url and missing:
