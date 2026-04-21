@@ -1,0 +1,42 @@
+name: Refresh Northbeam data
+
+on:
+  schedule:
+    # 8am / 12pm / 4pm / 8pm MYT (UTC+8) = 00:00 / 04:00 / 08:00 / 12:00 UTC
+    - cron: '0 0,4,8,12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Fetch Northbeam data
+        env:
+          NORTHBEAM_API_KEY: ${{ secrets.NORTHBEAM_API_KEY }}
+          NORTHBEAM_CLIENT_ID: ${{ secrets.NORTHBEAM_CLIENT_ID }}
+        run: python scripts/fetch_northbeam.py
+
+      - name: Commit refreshed data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/data/latest.json public/data/history/
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "chore(data): refresh Northbeam $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
