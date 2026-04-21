@@ -174,11 +174,18 @@ function AdListModal({ open, title, subtitle, ads, onClose }) {
                     <td style={{ ...td, fontSize: 10, fontFamily: "ui-monospace, monospace", maxWidth: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.ad_name}>{a.ad_name}</td>
                     <td style={{ ...td, textAlign: "center" }}>
                       {adIds.length > 0 ? (
-                        <a href={`https://www.facebook.com/ads/library/?id=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
-                          title={adIds.length > 1 ? `${adIds.length} Meta ad IDs — opens first` : `Meta ad ID: ${adIds[0]}`}
-                          style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
-                          View{adIds.length > 1 ? ` (${adIds.length})` : ""} ↗
-                        </a>
+                        <div style={{ display: "flex", gap: 6, justifyContent: "center", whiteSpace: "nowrap" }}>
+                          <a href={`https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
+                            title={`Open in Ads Manager (Meta login required)${adIds.length > 1 ? ` · ${adIds.length} ad IDs — opens first` : ""}\nAd ID: ${adIds[0]}`}
+                            style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
+                            Manager{adIds.length > 1 ? ` (${adIds.length})` : ""} ↗
+                          </a>
+                          <a href={`https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&id=${adIds[0]}&search_type=keyword_unordered&media_type=all`} target="_blank" rel="noopener noreferrer"
+                            title="Open in public Ads Library (only works for political / social-issue ads in most regions)"
+                            style={{ color: "#94a3b8", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
+                            Lib ↗
+                          </a>
+                        </div>
                       ) : <span style={{ color: "#cbd5e1", fontSize: 10 }}>—</span>}
                     </td>
                     <td style={{ ...td, textAlign: "right" }}>{fmt(a.metrics.spend)}</td>
