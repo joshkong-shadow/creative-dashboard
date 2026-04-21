@@ -497,17 +497,69 @@ export default function Dashboard() {
     });
   };
 
-  const saveMappings = () => {
+  const [saveState, setSaveState] = useState({ status: "idle", msg: "" }); // idle | saving | ok | err
+
+  const saveMappings = async () => {
+    // Always persist locally first — cheap, instant.
     localStorage.setItem("creative_dashboard_mappings", JSON.stringify(mappings));
     setSavedAt(new Date());
-    // Also download as JSON for committing to repo.
-    const blob = new Blob([JSON.stringify(mappings, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "mappings.json";
-    link.click();
-    URL.revokeObjectURL(url);
+
+    // Prompt for / reuse PAT. Stored in localStorage so it survives reloads.
+    let pat = localStorage.getItem("creative_dashboard_gh_pat");
+    if (!pat) {
+      pat = window.prompt("Enter a GitHub Personal Access Token (classic, repo scope) to sync mappings to the repo.\n\nStored in this browser only. Leave blank to skip and just download the JSON instead.");
+      if (pat) localStorage.setItem("creative_dashboard_gh_pat", pat.trim());
+    }
+
+    if (!pat) {
+      // No token — fall back to download.
+      const blob = new Blob([JSON.stringify(mappings, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "mappings.json"; a.click();
+      URL.revokeObjectURL(url);
+      setSaveState({ status: "ok", msg: "Downloaded mappings.json (no GitHub sync — token skipped)" });
+      return;
+    }
+
+    setSaveState({ status: "saving", msg: "Pushing to GitHub…" });
+    const repo = "joshkong-shadow/creative-dashboard";
+    const path = "data/mappings.json";
+    const api = `https://api.github.com/repos/${repo}/contents/${path}`;
+    const headers = { Authorization: `token ${pat.trim()}`, Accept: "application/vnd.github+json" };
+
+    try {
+      // Need current sha to update existing file.
+      let sha;
+      const head = await fetch(api, { headers });
+      if (head.ok) sha = (await head.json()).sha;
+      else if (head.status !== 404) throw new Error(`GET ${path}: ${head.status}`);
+
+      const content = btoa(unescape(encodeURIComponent(JSON.stringify(mappings, null, 2))));
+      const put = await fetch(api, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: `chore(mappings): update via dashboard @ ${new Date().toISOString()}`,
+          content,
+          ...(sha ? { sha } : {}),
+        }),
+      });
+      if (!put.ok) {
+        const body = await put.text();
+        if (put.status === 401 || put.status === 403) localStorage.removeItem("creative_dashboard_gh_pat");
+        throw new Error(`${put.status}: ${body.slice(0, 200)}`);
+      }
+      const res = await put.json();
+      setSaveState({ status: "ok", msg: `Committed to GitHub — ${res.commit?.sha?.slice(0, 7) || "ok"}` });
+    } catch (err) {
+      setSaveState({ status: "err", msg: String(err).slice(0, 200) });
+    }
+  };
+
+  const clearGithubPat = () => {
+    localStorage.removeItem("creative_dashboard_gh_pat");
+    setSaveState({ status: "ok", msg: "GitHub token cleared — you'll be prompted on next save." });
   };
 
   if (error) return <div style={{ padding: 24, fontFamily: "sans-serif", color: "#991b1b" }}>Error loading data: {error}</div>;
@@ -535,7 +587,7 @@ export default function Dashboard() {
   return (
     <div style={{ fontFamily: "'SF Pro Display', -apple-system, sans-serif", background: "#f8fafc", minHeight: "100vh", padding: "24px 20px" }}>
       <div style={{ maxWidth: 1280, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", margin: 0 }}>Creative Performance Report</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 700, color: "#0f172a", margin: 0 }}>IM8 Meta Creative Performance Report</h1>
         <p style={{ color: "#64748b", fontSize: 13, margin: "4px 0 4px" }}>
           {manifest.period.start.slice(0, 10)} → {manifest.period.end.slice(0, 10)} · {ads.length.toLocaleString()} unique ads · Attribution: {manifest.attribution.primary}
         </p>
@@ -737,12 +789,22 @@ export default function Dashboard() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 12, gap: 12 }}>
                 <p style={{ fontSize: 12, color: "#64748b", margin: 0, maxWidth: 720 }}>
                   Review unique values parsed from ad names. Click any value to preview 10 sample ads + download full CSV.
-                  Rename typos with the input (e.g. <code>MULTIPLESUPP</code> → <code>MULTISUPP</code>).
-                  Save to persist and download a <code>mappings.json</code> for the repo.
+                  Use <strong>Edit</strong> to reclassify a value into an existing category or create a new one (e.g. <code>MULTIPLESUPP</code> → <code>MULTISUPP</code>).
+                  Save pushes <code>data/mappings.json</code> to GitHub so the next data refresh picks it up.
                 </p>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  {savedAt && <span style={{ fontSize: 11, color: "#16a34a" }}>Saved {savedAt.toLocaleTimeString()}</span>}
-                  <button onClick={saveMappings} style={{ padding: "6px 14px", border: "none", background: "#0f172a", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Save mappings</button>
+                  {saveState.status === "ok" && <span style={{ fontSize: 11, color: "#16a34a", maxWidth: 240 }} title={saveState.msg}>✓ {saveState.msg}</span>}
+                  {saveState.status === "err" && <span style={{ fontSize: 11, color: "#dc2626", maxWidth: 240 }} title={saveState.msg}>✕ {saveState.msg}</span>}
+                  {saveState.status === "saving" && <span style={{ fontSize: 11, color: "#64748b" }}>Saving…</span>}
+                  {savedAt && saveState.status === "idle" && <span style={{ fontSize: 11, color: "#16a34a" }}>Saved {savedAt.toLocaleTimeString()}</span>}
+                  <button onClick={saveMappings} disabled={saveState.status === "saving"}
+                    style={{ padding: "6px 14px", border: "none", background: saveState.status === "saving" ? "#94a3b8" : "#0f172a", color: "#fff", borderRadius: 6, cursor: saveState.status === "saving" ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>
+                    Save mappings
+                  </button>
+                  <button onClick={clearGithubPat} title="Clear saved GitHub token"
+                    style={{ padding: "6px 8px", border: "1px solid #d1d5db", background: "#fff", color: "#64748b", borderRadius: 6, cursor: "pointer", fontSize: 11 }}>
+                    ⚙
+                  </button>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -799,9 +861,11 @@ export default function Dashboard() {
   );
 }
 
-// -------- Cleanup table subcomponent (sortable, clickable, rename-in-place) --------
+// -------- Cleanup table subcomponent (sortable, clickable, Edit-popover) --------
 function CleanupTable({ values, mappings, setMapping, selected, onSelect }) {
   const [sort, setSort] = useState({ col: "spend", dir: "desc" });
+  const [editingValue, setEditingValue] = useState(null);
+
   const sorted = useMemo(() => {
     const mul = sort.dir === "desc" ? -1 : 1;
     return values.slice().sort((a, b) => {
@@ -810,36 +874,127 @@ function CleanupTable({ values, mappings, setMapping, selected, onSelect }) {
       return mul * (va - vb);
     });
   }, [values, sort]);
+
+  // Union of raw values + existing mapping targets — these are the "categories" available.
+  const categories = useMemo(() => {
+    const set = new Set(values.map(v => v.value));
+    for (const target of Object.values(mappings)) if (target) set.add(target);
+    return Array.from(set).sort((a, b) => String(a).localeCompare(String(b)));
+  }, [values, mappings]);
+
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-      <thead>
-        <tr style={{ borderBottom: "2px solid #e2e8f0" }}>
-          <SortHeader label="Value" col="value" sort={sort} setSort={setSort} align="left" />
-          <SortHeader label="Ads" col="n" sort={sort} setSort={setSort} />
-          <SortHeader label="Total Spend" col="spend" sort={sort} setSort={setSort} />
-          <th style={{ ...th, textAlign: "left" }}>Rename to</th>
-        </tr>
-      </thead>
-      <tbody>
-        {sorted.slice(0, 300).map((v) => (
-          <tr key={v.value} onClick={() => onSelect(v.value)}
-              style={{ borderBottom: "1px solid #f1f5f9", cursor: "pointer", background: selected === v.value ? "#eff6ff" : "transparent" }}>
-            <td style={{ ...td, fontFamily: "ui-monospace, monospace" }}>{v.value}{mappings[v.value] && <span style={{ marginLeft: 6, color: "#16a34a", fontSize: 10 }}>→ {mappings[v.value]}</span>}</td>
-            <td style={{ ...td, textAlign: "right", color: "#64748b" }}>{fmtNum(v.n)}</td>
-            <td style={{ ...td, textAlign: "right" }}>{fmt(v.spend)}</td>
-            <td style={{ ...td }} onClick={e => e.stopPropagation()}>
-              <input
-                type="text"
-                value={mappings[v.value] || ""}
-                placeholder="(rename to…)"
-                onChange={e => setMapping(v.value, e.target.value)}
-                style={{ padding: "3px 6px", borderRadius: 4, border: "1px solid #d1d5db", fontSize: 11, width: 180, fontFamily: "ui-monospace, monospace" }}
-              />
-            </td>
+    <>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead>
+          <tr style={{ borderBottom: "2px solid #e2e8f0" }}>
+            <SortHeader label="Value" col="value" sort={sort} setSort={setSort} align="left" />
+            <SortHeader label="Ads" col="n" sort={sort} setSort={setSort} />
+            <SortHeader label="Total Spend" col="spend" sort={sort} setSort={setSort} />
+            <th style={{ ...th, textAlign: "left" }}>Mapped to</th>
+            <th style={{ ...th, textAlign: "right" }}></th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {sorted.slice(0, 300).map((v) => {
+            const mapped = mappings[v.value];
+            return (
+              <tr key={v.value} onClick={() => onSelect(v.value)}
+                  style={{ borderBottom: "1px solid #f1f5f9", cursor: "pointer", background: selected === v.value ? "#eff6ff" : "transparent" }}>
+                <td style={{ ...td, fontFamily: "ui-monospace, monospace" }}>{v.value}</td>
+                <td style={{ ...td, textAlign: "right", color: "#64748b" }}>{fmtNum(v.n)}</td>
+                <td style={{ ...td, textAlign: "right" }}>{fmt(v.spend)}</td>
+                <td style={{ ...td, fontFamily: "ui-monospace, monospace" }}>
+                  {mapped ? (
+                    <span style={{ background: "#dcfce7", color: "#166534", padding: "2px 8px", borderRadius: 4, fontWeight: 600 }}>{mapped}</span>
+                  ) : <span style={{ color: "#cbd5e1" }}>—</span>}
+                </td>
+                <td style={{ ...td, textAlign: "right" }} onClick={e => e.stopPropagation()}>
+                  <button onClick={() => setEditingValue(v.value)}
+                    style={{ padding: "3px 10px", border: "1px solid #d1d5db", background: "#fff", borderRadius: 5, cursor: "pointer", fontSize: 11, fontWeight: 600, color: "#334155" }}>
+                    Edit
+                  </button>
+                  {mapped && (
+                    <button onClick={() => setMapping(v.value, "")} title="Clear mapping"
+                      style={{ marginLeft: 4, padding: "3px 6px", border: "1px solid #fecaca", background: "#fff", color: "#dc2626", borderRadius: 5, cursor: "pointer", fontSize: 11, fontWeight: 600 }}>
+                      ×
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {editingValue != null && (
+        <EditCategoryModal
+          value={editingValue}
+          current={mappings[editingValue] || ""}
+          categories={categories.filter(c => c !== editingValue)}
+          onSave={(newVal) => { setMapping(editingValue, newVal); setEditingValue(null); }}
+          onClose={() => setEditingValue(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// -------- Edit category modal (pick existing or create new) --------
+function EditCategoryModal({ value, current, categories, onSave, onClose }) {
+  const [search, setSearch] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+
+  const filtered = useMemo(
+    () => categories.filter(c => !search || String(c).toLowerCase().includes(search.toLowerCase())),
+    [categories, search]
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 10, width: 420, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 40px rgba(0,0,0,0.2)" }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e2e8f0" }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3 }}>Reclassify</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", fontFamily: "ui-monospace, monospace", marginTop: 2, wordBreak: "break-all" }}>{value}</div>
+          {current && <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Currently mapped to <strong style={{ color: "#166534" }}>{current}</strong></div>}
+        </div>
+        <div style={{ padding: "10px 12px", borderBottom: "1px solid #e2e8f0" }}>
+          <input autoFocus placeholder="Search existing categories…" value={search} onChange={e => setSearch(e.target.value)}
+            style={{ width: "100%", padding: "6px 10px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12 }} />
+        </div>
+        <div style={{ overflowY: "auto", flex: 1, maxHeight: 320 }}>
+          {filtered.map(c => (
+            <div key={c} onClick={() => onSave(c)}
+              style={{ padding: "8px 14px", fontSize: 12, fontFamily: "ui-monospace, monospace", cursor: "pointer", borderBottom: "1px solid #f1f5f9", background: c === current ? "#eff6ff" : "transparent", display: "flex", alignItems: "center", gap: 6 }}
+              onMouseEnter={e => e.currentTarget.style.background = "#f8fafc"}
+              onMouseLeave={e => e.currentTarget.style.background = c === current ? "#eff6ff" : "transparent"}>
+              {c === current && <span style={{ color: "#16a34a", fontSize: 11 }}>✓</span>}
+              <span>{c}</span>
+            </div>
+          ))}
+          {filtered.length === 0 && <div style={{ padding: 20, textAlign: "center", fontSize: 11, color: "#94a3b8" }}>No matches</div>}
+        </div>
+        <div style={{ padding: "10px 12px", borderTop: "1px solid #e2e8f0", display: "flex", gap: 8, alignItems: "center" }}>
+          {creating ? (
+            <>
+              <input autoFocus placeholder="New category name" value={newName} onChange={e => setNewName(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && newName.trim()) onSave(newName.trim()); }}
+                style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid #d1d5db", fontSize: 12, fontFamily: "ui-monospace, monospace" }} />
+              <button onClick={() => newName.trim() && onSave(newName.trim())}
+                style={{ padding: "6px 12px", border: "none", background: "#0f172a", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Save</button>
+              <button onClick={() => { setCreating(false); setNewName(""); }}
+                style={{ padding: "6px 10px", border: "1px solid #d1d5db", background: "#fff", color: "#64748b", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>Cancel</button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => setCreating(true)}
+                style={{ padding: "6px 12px", border: "1px dashed #94a3b8", background: "#fff", color: "#334155", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>+ Create new category</button>
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8" }}>Click a category to apply</span>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
