@@ -1202,21 +1202,28 @@ function ValuePicker({ ads, dim, selected, onToggle, onClear }) {
         <span style={{ marginLeft: "auto", color: "#94a3b8", fontSize: 11 }}>▾</span>
       </div>
       {open && dim && (
-        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, boxShadow: "0 6px 16px rgba(0,0,0,0.1)", zIndex: 20, maxHeight: 320, overflowY: "auto" }}>
-          <div style={{ padding: 8, borderBottom: "1px solid #e2e8f0", position: "sticky", top: 0, background: "#fff", display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, boxShadow: "0 6px 16px rgba(0,0,0,0.1)", zIndex: 20, maxHeight: 360, display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: 8, borderBottom: "1px solid #e2e8f0", background: "#fff", display: "flex", gap: 8, alignItems: "center" }}>
             <input autoFocus placeholder="Search values…" value={search} onChange={e => setSearch(e.target.value)}
               style={{ flex: 1, padding: "4px 8px", borderRadius: 4, border: "1px solid #e2e8f0", fontSize: 11 }} />
             {selArr.length > 0 && <button onClick={onClear} style={{ border: "none", background: "transparent", color: "#dc2626", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>Clear</button>}
-            <button onClick={() => setOpen(false)} style={{ border: "none", background: "transparent", color: "#64748b", cursor: "pointer", fontSize: 14 }}>×</button>
           </div>
-          {filtered.slice(0, 200).map(v => (
-            <label key={v.value} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11 }}>
-              <input type="checkbox" checked={selected.has(v.value)} onChange={() => onToggle(v.value)} />
-              <span style={{ fontFamily: "ui-monospace, monospace", flex: 1 }}>{v.value}</span>
-              <span style={{ color: "#94a3b8" }}>{v.n}</span>
-            </label>
-          ))}
-          {filtered.length > 200 && <div style={{ padding: 8, fontSize: 10, color: "#94a3b8", textAlign: "center" }}>Showing 200 of {filtered.length} — refine search.</div>}
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {filtered.slice(0, 200).map(v => (
+              <label key={v.value} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11 }}>
+                <input type="checkbox" checked={selected.has(v.value)} onChange={() => onToggle(v.value)} />
+                <span style={{ fontFamily: "ui-monospace, monospace", flex: 1 }}>{v.value}</span>
+                <span style={{ color: "#94a3b8" }}>{v.n}</span>
+              </label>
+            ))}
+            {filtered.length > 200 && <div style={{ padding: 8, fontSize: 10, color: "#94a3b8", textAlign: "center" }}>Showing 200 of {filtered.length} — refine search.</div>}
+          </div>
+          <div style={{ padding: 8, borderTop: "1px solid #e2e8f0", background: "#fff", display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button onClick={() => setOpen(false)}
+              style={{ padding: "6px 16px", border: "none", background: "#0f172a", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 600 }}>
+              Select{selArr.length > 0 ? ` (${selArr.length})` : ""}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1330,7 +1337,20 @@ function AnalysisTab({ ads, ALL_DIMS_LABELS, METRIC_MAP, anRules, setAnRules, an
     });
   };
 
-  const excludeDimValues = useMemo(() => expandedExcludeDim ? dimensionValues(ads, expandedExcludeDim).slice().sort((a, b) => String(a.value).localeCompare(String(b.value))).slice(0, 100) : [], [ads, expandedExcludeDim]);
+  const setExcludeAll = (dim, values) => {
+    setAnExclusions(ex => ({ ...ex, [dim]: new Set(values.map(v => v.value)) }));
+  };
+
+  const clearExcludeForDim = (dim) => {
+    setAnExclusions(ex => {
+      const next = { ...ex };
+      delete next[dim];
+      return next;
+    });
+  };
+
+  const allExcludeValues = useMemo(() => expandedExcludeDim ? dimensionValues(ads, expandedExcludeDim).slice().sort((a, b) => String(a.value).localeCompare(String(b.value))) : [], [ads, expandedExcludeDim]);
+  const excludeDimValues = useMemo(() => allExcludeValues.slice(0, 100), [allExcludeValues]);
 
   // Dims actually used (non-empty)
   const activeDims = anRules.map(r => r.dim).filter(Boolean);
@@ -1423,20 +1443,44 @@ function AnalysisTab({ ads, ALL_DIMS_LABELS, METRIC_MAP, anRules, setAnRules, an
               <button onClick={() => setAnExclusions({})} style={{ fontSize: 11, border: "none", background: "transparent", color: "#dc2626", cursor: "pointer", fontWeight: 600 }}>Clear all exclusions</button>
             }
           </div>
-          {expandedExcludeDim && (
-            <div style={{ marginTop: 10, padding: 10, background: "#f8fafc", borderRadius: 6, maxHeight: 240, overflowY: "auto" }}>
-              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>Check values to exclude from <strong>{ALL_DIMS_LABELS[expandedExcludeDim]}</strong>:</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 4 }}>
-                {excludeDimValues.map(v => (
-                  <label key={v.value} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, cursor: "pointer" }}>
-                    <input type="checkbox" checked={anExclusions[expandedExcludeDim]?.has(v.value) || false} onChange={() => toggleExclude(expandedExcludeDim, v.value)} />
-                    <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 10 }}>{v.value}</span>
-                    <span style={{ color: "#94a3b8", fontSize: 10 }}>({v.n})</span>
-                  </label>
-                ))}
+          {expandedExcludeDim && (() => {
+            const excludedCount = anExclusions[expandedExcludeDim]?.size || 0;
+            const allSelected = excludedCount >= allExcludeValues.length && allExcludeValues.length > 0;
+            return (
+              <div style={{ marginTop: 10, padding: 10, background: "#f8fafc", borderRadius: 6, maxHeight: 280, overflowY: "auto" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 11, color: "#64748b" }}>Check values to exclude from <strong>{ALL_DIMS_LABELS[expandedExcludeDim]}</strong>:</div>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => allSelected ? clearExcludeForDim(expandedExcludeDim) : setExcludeAll(expandedExcludeDim, allExcludeValues)}
+                      style={{ padding: "3px 10px", border: "1px solid #d1d5db", background: "#fff", borderRadius: 4, cursor: "pointer", fontSize: 10, fontWeight: 600, color: "#334155" }}>
+                      {allSelected ? "Deselect all" : `Select all (${allExcludeValues.length})`}
+                    </button>
+                    {excludedCount > 0 && !allSelected && (
+                      <button onClick={() => clearExcludeForDim(expandedExcludeDim)}
+                        style={{ padding: "3px 10px", border: "1px solid #fecaca", background: "#fff", borderRadius: 4, cursor: "pointer", fontSize: 10, fontWeight: 600, color: "#dc2626" }}>
+                        Clear ({excludedCount})
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 4 }}>
+                  {excludeDimValues.map(v => (
+                    <label key={v.value} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, cursor: "pointer" }}>
+                      <input type="checkbox" checked={anExclusions[expandedExcludeDim]?.has(v.value) || false} onChange={() => toggleExclude(expandedExcludeDim, v.value)} />
+                      <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 10 }}>{v.value}</span>
+                      <span style={{ color: "#94a3b8", fontSize: 10 }}>({v.n})</span>
+                    </label>
+                  ))}
+                </div>
+                {allExcludeValues.length > excludeDimValues.length && (
+                  <div style={{ marginTop: 8, fontSize: 10, color: "#94a3b8", textAlign: "center" }}>
+                    Showing {excludeDimValues.length} of {allExcludeValues.length} values — "Select all" applies to every value.
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       </div>
 
