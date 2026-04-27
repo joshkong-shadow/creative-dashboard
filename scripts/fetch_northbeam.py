@@ -242,8 +242,8 @@ def load_mappings(path: pathlib.Path) -> dict:
 
 
 def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -> dict:
-    """Return {ad_id: preview_shareable_link}, starting from `cache` and topping
-    up with missing ids from Meta's Graph API.
+    """Return {ad_id: {"preview_link": str, "thumbnail_url": str|None}}, starting
+    from `cache` and topping up missing ids from Meta's Graph API.
 
     Uses the account-level /ads endpoint with pagination (limit=500). Stops
     early once every id in `needed` is covered. Gracefully returns the cache
@@ -251,7 +251,9 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     the links we already have.
     """
     result = dict(cache)
-    missing = needed - set(result.keys())
+    # An entry without a thumbnail is still re-fetched so we can backfill thumbs
+    # for ads whose preview_link was cached before the thumbnail field existed.
+    missing = {x for x in needed if x not in result or not result[x].get("thumbnail_url")}
     if not missing:
         print(f"  Meta previews: cache covers all {len(needed)} ads — no API call needed")
         return result
@@ -264,9 +266,11 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     # Note: DELETED is rejected by Meta (Cannot request deleted objects).
     statuses = '["ACTIVE","PAUSED","PENDING_REVIEW","DISAPPROVED","PREAPPROVED","PENDING_BILLING_INFO","CAMPAIGN_PAUSED","ARCHIVED","ADSET_PAUSED","IN_PROCESS","WITH_ISSUES"]'
     from urllib.parse import quote
-    url = f"{base}/{account_id}/ads?fields=id,preview_shareable_link&limit=500&effective_status={quote(statuses)}&access_token={token}"
+    fields = "id,preview_shareable_link,creative{thumbnail_url,image_url}"
+    url = f"{base}/{account_id}/ads?fields={fields}&limit=500&effective_status={quote(statuses)}&access_token={token}"
     pages = 0
     fetched = 0
+    thumbed = 0
     while url and missing:
         try:
             with urlreq.urlopen(url, timeout=60) as r:
@@ -280,20 +284,31 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
         for entry in body.get("data", []):
             ad_id = entry.get("id")
             link = entry.get("preview_shareable_link")
-            if ad_id and link and ad_id not in result:
-                result[ad_id] = link
-                missing.discard(ad_id)
+            creative = entry.get("creative") or {}
+            # Prefer image_url (full-res) when present; fall back to thumbnail_url.
+            thumb = creative.get("image_url") or creative.get("thumbnail_url")
+            if not ad_id or not link:
+                continue
+            existing = result.get(ad_id)
+            if existing is None:
+                result[ad_id] = {"preview_link": link, "thumbnail_url": thumb}
                 fetched += 1
+                if thumb:
+                    thumbed += 1
+            elif thumb and not existing.get("thumbnail_url"):
+                existing["thumbnail_url"] = thumb
+                thumbed += 1
+            missing.discard(ad_id)
         pages += 1
         url = body.get("paging", {}).get("next")
         if pages % 10 == 0:
-            print(f"  …{pages} pages, {fetched} new previews, {len(missing)} still missing")
-    print(f"  Meta previews: {fetched} fetched across {pages} pages, {len(result)} total ({len(missing)} still missing)")
+            print(f"  …{pages} pages, {fetched} new previews / {thumbed} thumbs, {len(missing)} still missing")
+    print(f"  Meta previews: {fetched} new + {thumbed} thumbnails across {pages} pages, {len(result)} total ({len(missing)} still missing)")
     return result
 
 
 def load_previews_cache(path: pathlib.Path) -> dict:
-    """Rebuild the ad_id→preview_link map from the previous manifest."""
+    """Rebuild the ad_id→{preview_link, thumbnail_url} map from the previous manifest."""
     if not path.exists():
         return {}
     try:
@@ -305,8 +320,9 @@ def load_previews_cache(path: pathlib.Path) -> dict:
         link = ad.get("preview_link")
         if not link:
             continue
+        thumb = ad.get("thumbnail_url")
         for meta_id in ad.get("meta_ad_ids", []) or []:
-            cache[meta_id] = link
+            cache[meta_id] = {"preview_link": link, "thumbnail_url": thumb}
     return cache
 
 
@@ -348,14 +364,19 @@ def main():
     print(f"  cache has {len(cache)} links, {len(needed)} unique ad_ids in this refresh")
     previews = fetch_meta_previews(meta_token, meta_account, needed, cache)
     attached = 0
+    thumbed = 0
     for ad in ads:
-        links = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
-        if links:
-            ad["preview_link"] = links[0]
-            if len(links) > 1:
-                ad["preview_links_all"] = links
+        entries = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
+        if entries:
+            ad["preview_link"] = entries[0]["preview_link"]
+            thumb = next((e["thumbnail_url"] for e in entries if e.get("thumbnail_url")), None)
+            if thumb:
+                ad["thumbnail_url"] = thumb
+                thumbed += 1
+            if len(entries) > 1:
+                ad["preview_links_all"] = [e["preview_link"] for e in entries]
             attached += 1
-    print(f"  attached preview_link to {attached}/{len(ads)} ads")
+    print(f"  attached preview_link to {attached}/{len(ads)} ads ({thumbed} with thumbnails)")
 
     manifest = {
         "generated_at": now.isoformat(),

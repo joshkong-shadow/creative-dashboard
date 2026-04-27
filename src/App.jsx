@@ -169,19 +169,32 @@ function AdListModal({ open, title, subtitle, ads, onClose }) {
               {sortedAds.slice(0, 500).map((a, i) => {
                 const pctNew = a.metrics.visits ? (a.metrics.new_visits / a.metrics.visits) * 100 : null;
                 const adIds = a.meta_ad_ids || [];
+                const managerUrl = adIds[0] ? `https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${adIds[0]}` : null;
+                const previewUrl = a.preview_link || managerUrl;
+                const previewTitle = a.preview_link
+                  ? `Preview the creative (no login). Meta ad ID: ${adIds[0] || "?"}`
+                  : `Open in Ads Manager (Meta login required). Ad ID: ${adIds[0] || "?"}`;
                 return (
                   <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
                     <td style={{ ...td, fontSize: 10, fontFamily: "ui-monospace, monospace", maxWidth: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.ad_name}>{a.ad_name}</td>
-                    <td style={{ ...td, textAlign: "center" }}>
-                      {a.preview_link ? (
+                    <td style={{ ...td, textAlign: "center", width: 72 }}>
+                      {a.thumbnail_url && previewUrl ? (
+                        <a href={previewUrl} target="_blank" rel="noopener noreferrer" title={previewTitle} style={{ display: "inline-block", lineHeight: 0 }}>
+                          <img src={a.thumbnail_url} alt=""
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            onError={e => { e.currentTarget.style.display = "none"; e.currentTarget.parentElement.textContent = a.preview_link ? "Preview ↗" : "Manager ↗"; }}
+                            style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 4, border: "1px solid #e2e8f0", display: "block" }} />
+                        </a>
+                      ) : a.preview_link ? (
                         <a href={a.preview_link} target="_blank" rel="noopener noreferrer"
-                          title={`Preview the creative (no login). Meta ad ID: ${adIds[0] || "?"}`}
+                          title={previewTitle}
                           style={{ color: "#2563eb", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
                           Preview ↗
                         </a>
-                      ) : adIds.length > 0 ? (
-                        <a href={`https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${adIds[0]}`} target="_blank" rel="noopener noreferrer"
-                          title={`Open in Ads Manager (Meta login required). Ad ID: ${adIds[0]}`}
+                      ) : managerUrl ? (
+                        <a href={managerUrl} target="_blank" rel="noopener noreferrer"
+                          title={previewTitle}
                           style={{ color: "#94a3b8", textDecoration: "none", fontSize: 10, fontWeight: 600 }}>
                           Manager ↗
                         </a>
