@@ -266,8 +266,14 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     # Note: DELETED is rejected by Meta (Cannot request deleted objects).
     statuses = '["ACTIVE","PAUSED","PENDING_REVIEW","DISAPPROVED","PREAPPROVED","PENDING_BILLING_INFO","CAMPAIGN_PAUSED","ARCHIVED","ADSET_PAUSED","IN_PROCESS","WITH_ISSUES"]'
     from urllib.parse import quote
-    fields = "id,preview_shareable_link,creative{thumbnail_url,image_url}"
-    url = f"{base}/{account_id}/ads?fields={fields}&limit=500&effective_status={quote(statuses)}&access_token={token}"
+    # Adding creative{thumbnail_url} doubles per-row payload, so cap limit at
+    # 200 to stay under Meta's "reduce the amount of data" 500 threshold.
+    # image_url is dropped — heavier than thumbnail_url, and thumbnail_url is
+    # all the dashboard needs (renders at 56px).
+    fields = "id,preview_shareable_link,creative{thumbnail_url}"
+    page_size = 200
+    base_url = f"{base}/{account_id}/ads?fields={fields}&effective_status={quote(statuses)}&access_token={token}"
+    url = f"{base_url}&limit={page_size}"
     pages = 0
     fetched = 0
     thumbed = 0
@@ -276,7 +282,16 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
             with urlreq.urlopen(url, timeout=60) as r:
                 body = json.loads(r.read().decode())
         except HTTPError as e:
-            print(f"  Meta API {e.code} — keeping {len(result)} cached previews: {e.read().decode()[:200]}")
+            err_body = e.read().decode()[:300]
+            # Meta 500 ("reduce the amount of data") on the very first page →
+            # back off to a smaller page size and resume from the start. On
+            # later pages, the cursor URL embeds limit, so just bail.
+            if e.code == 500 and pages == 0 and page_size > 50:
+                page_size = max(50, page_size // 2)
+                print(f"  Meta API 500 on first page — retrying with limit={page_size}: {err_body[:120]}")
+                url = f"{base_url}&limit={page_size}"
+                continue
+            print(f"  Meta API {e.code} — keeping {len(result)} cached previews: {err_body}")
             break
         except Exception as e:
             print(f"  Meta API error — keeping cache: {type(e).__name__}: {e}")
@@ -285,8 +300,7 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
             ad_id = entry.get("id")
             link = entry.get("preview_shareable_link")
             creative = entry.get("creative") or {}
-            # Prefer image_url (full-res) when present; fall back to thumbnail_url.
-            thumb = creative.get("image_url") or creative.get("thumbnail_url")
+            thumb = creative.get("thumbnail_url")
             if not ad_id or not link:
                 continue
             existing = result.get(ad_id)
