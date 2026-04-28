@@ -299,6 +299,8 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     fetched = 0
     thumbed = 0
     named = 0
+    rate_limit_retries = 0
+    max_rate_limit_retries = 3  # 15 + 30 + 45 = 90 min total worst case
     while url and missing:
         try:
             with urlreq.urlopen(url, timeout=60) as r:
@@ -312,6 +314,20 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
                 page_size = max(50, page_size // 2)
                 print(f"  Meta API 500 on first page — retrying with limit={page_size}: {err_body[:120]}")
                 url = f"{base_url}&limit={page_size}"
+                continue
+            # Meta 400 "too many calls" (account-level rate limit, code 80004) →
+            # sleep through the cooldown window and resume on the same cursor.
+            # Window is typically ~1 hour but decays gradually; back off
+            # progressively up to 45 min then give up.
+            is_rate_limit = (
+                e.code == 400
+                and ("too many calls" in err_body.lower() or "code\":80004" in err_body)
+            )
+            if is_rate_limit and rate_limit_retries < max_rate_limit_retries:
+                rate_limit_retries += 1
+                wait = 900 * rate_limit_retries  # 15, 30, 45 min
+                print(f"  Meta rate-limit hit (attempt {rate_limit_retries}/{max_rate_limit_retries}) — sleeping {wait//60} min and resuming on the same cursor")
+                time.sleep(wait)
                 continue
             print(f"  Meta API {e.code} — keeping {len(result)} cached previews: {err_body}")
             break
