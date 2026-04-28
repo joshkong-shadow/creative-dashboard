@@ -145,15 +145,22 @@ def _safe_int(v: str) -> Optional[int]:
     return int(f) if f is not None else None
 
 
-def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
+def aggregate_rows(csv_text: str, mappings: Optional[dict] = None, meta_names: Optional[dict] = None) -> list:
     """Collapse the multi-row-per-ad CSV into one parsed+enriched row per ad.
 
     The Northbeam CSV returns one row per (ad, attribution_model, attribution_window,
     accounting_mode) tuple. We filter to the chosen attribution combo, merge dedup
     duplicates by canonical name, and apply parse_ad_name.
+
+    `meta_names` (optional): {ad_id: real_meta_name} — when Northbeam returns the
+    synthetic "Ad ID: X, Adset ID: Y, Campaign ID: Z" placeholder (common for
+    Advantage+/ASC ads), we substitute Meta's real name before parsing so the
+    naming-convention parser can extract format/concept/creator/date dimensions.
     """
+    meta_names = meta_names or {}
     reader = csv.DictReader(io.StringIO(csv_text))
     by_ad: dict[str, dict] = {}
+    synth_overridden = 0
     # Northbeam returns duplicate rows per attribution combo (Accrual-7d and Cash-lifetime
     # under the VA model). Meta-reported metrics are passthrough and identical across
     # combos, but NB-attributed metrics differ. We keep Cash snapshot (lifetime) rows
@@ -166,6 +173,16 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
         raw_name = row.get("ad_name", "").strip()
         if not raw_name:
             continue
+
+        ad_id = (row.get("ad_id") or "").strip()
+        # Northbeam ships "Ad ID: X, Adset ID: Y, Campaign ID: Z" as a placeholder
+        # for ~7k Advantage+ ads where their pipeline didn't pull the real name.
+        # When we have Meta's actual name for this ad_id, swap it in BEFORE parsing
+        # so the naming-convention dimensions get populated correctly.
+        if ad_id.isdigit() and raw_name.startswith("Ad ID:") and ad_id in meta_names:
+            raw_name = meta_names[ad_id]
+            synth_overridden += 1
+
         parsed = parse_ad_name(raw_name)
         dedup = parsed["dedup_key"] or raw_name
 
@@ -187,7 +204,6 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
             "new_visits": _safe_float(row.get("new_visits")) or 0.0,
         }
 
-        ad_id = (row.get("ad_id") or "").strip()
         # Only keep numeric platform ad IDs (Meta ad IDs) — UTM kind rows echo ad_name here.
         meta_ad_id = ad_id if ad_id.isdigit() else None
 
@@ -232,6 +248,8 @@ def aggregate_rows(csv_text: str, mappings: Optional[dict] = None) -> list:
         rec["meta_ad_ids"] = sorted(rec["meta_ad_ids"])
         out.append(rec)
 
+    if synth_overridden:
+        print(f"  substituted Meta names for {synth_overridden} synthetic-named rows")
     return out
 
 
@@ -242,8 +260,8 @@ def load_mappings(path: pathlib.Path) -> dict:
 
 
 def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -> dict:
-    """Return {ad_id: {"preview_link": str, "thumbnail_url": str|None}}, starting
-    from `cache` and topping up missing ids from Meta's Graph API.
+    """Return {ad_id: {"preview_link": str, "thumbnail_url": str|None, "name": str|None}},
+    starting from `cache` and topping up missing ids from Meta's Graph API.
 
     Uses the account-level /ads endpoint with pagination (limit=500). Stops
     early once every id in `needed` is covered. Gracefully returns the cache
@@ -251,9 +269,12 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     the links we already have.
     """
     result = dict(cache)
-    # An entry without a thumbnail is still re-fetched so we can backfill thumbs
-    # for ads whose preview_link was cached before the thumbnail field existed.
-    missing = {x for x in needed if x not in result or not result[x].get("thumbnail_url")}
+    # An entry missing a thumbnail OR a name is re-fetched so we can backfill
+    # any field added in a later release without losing what we already have.
+    missing = {
+        x for x in needed
+        if x not in result or not result[x].get("thumbnail_url") or not result[x].get("name")
+    }
     if not missing:
         print(f"  Meta previews: cache covers all {len(needed)} ads — no API call needed")
         return result
@@ -270,13 +291,14 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     # 200 to stay under Meta's "reduce the amount of data" 500 threshold.
     # image_url is dropped — heavier than thumbnail_url, and thumbnail_url is
     # all the dashboard needs (renders at 56px).
-    fields = "id,preview_shareable_link,creative{thumbnail_url}"
+    fields = "id,name,preview_shareable_link,creative{thumbnail_url}"
     page_size = 200
     base_url = f"{base}/{account_id}/ads?fields={fields}&effective_status={quote(statuses)}&access_token={token}"
     url = f"{base_url}&limit={page_size}"
     pages = 0
     fetched = 0
     thumbed = 0
+    named = 0
     while url and missing:
         try:
             with urlreq.urlopen(url, timeout=60) as r:
@@ -301,28 +323,38 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
             link = entry.get("preview_shareable_link")
             creative = entry.get("creative") or {}
             thumb = creative.get("thumbnail_url")
+            name = entry.get("name")
             if not ad_id or not link:
                 continue
             existing = result.get(ad_id)
             if existing is None:
-                result[ad_id] = {"preview_link": link, "thumbnail_url": thumb}
+                result[ad_id] = {"preview_link": link, "thumbnail_url": thumb, "name": name}
                 fetched += 1
                 if thumb:
                     thumbed += 1
-            elif thumb and not existing.get("thumbnail_url"):
-                existing["thumbnail_url"] = thumb
-                thumbed += 1
+                if name:
+                    named += 1
+            else:
+                if thumb and not existing.get("thumbnail_url"):
+                    existing["thumbnail_url"] = thumb
+                    thumbed += 1
+                if name and not existing.get("name"):
+                    existing["name"] = name
+                    named += 1
             missing.discard(ad_id)
         pages += 1
         url = body.get("paging", {}).get("next")
         if pages % 10 == 0:
-            print(f"  …{pages} pages, {fetched} new previews / {thumbed} thumbs, {len(missing)} still missing")
-    print(f"  Meta previews: {fetched} new + {thumbed} thumbnails across {pages} pages, {len(result)} total ({len(missing)} still missing)")
+            print(f"  …{pages} pages, {fetched} new / {thumbed} thumbs / {named} names, {len(missing)} still missing")
+    print(f"  Meta previews: {fetched} new + {thumbed} thumbs + {named} names across {pages} pages, {len(result)} total ({len(missing)} still missing)")
     return result
 
 
 def load_previews_cache(path: pathlib.Path) -> dict:
-    """Rebuild the ad_id→{preview_link, thumbnail_url} map from the previous manifest."""
+    """Rebuild the ad_id→{preview_link, thumbnail_url, name} map from the previous
+    manifest. The per-ad name lives in `meta_names` (a parallel dict keyed by
+    ad_id) rather than on the ad record itself, since one record may aggregate
+    several Meta ad ids and we need the name lookup to stay 1:1."""
     if not path.exists():
         return {}
     try:
@@ -330,13 +362,18 @@ def load_previews_cache(path: pathlib.Path) -> dict:
     except Exception:
         return {}
     cache = {}
+    meta_names_prev = prev.get("meta_names") or {}
     for ad in prev.get("ads", []):
         link = ad.get("preview_link")
         if not link:
             continue
         thumb = ad.get("thumbnail_url")
         for meta_id in ad.get("meta_ad_ids", []) or []:
-            cache[meta_id] = {"preview_link": link, "thumbnail_url": thumb}
+            cache[meta_id] = {
+                "preview_link": link,
+                "thumbnail_url": thumb,
+                "name": meta_names_prev.get(meta_id),
+            }
     return cache
 
 
@@ -366,17 +403,35 @@ def main():
     csv_text = download_csv(url)
     print(f"  {len(csv_text)} bytes")
 
-    print("Parsing & aggregating…")
-    ads = aggregate_rows(csv_text, mappings=mappings)
-    print(f"  {len(ads)} unique ads")
+    # Pre-scan the CSV for all numeric ad_ids so we can fetch Meta data BEFORE
+    # aggregation. We need Meta names available at parse time to override
+    # Northbeam's synthetic "Ad ID: X, Adset ID: Y, Campaign ID: Z" placeholders
+    # for Advantage+/ASC ads.
+    print("Pre-scanning CSV for ad_ids…")
+    pre_reader = csv.DictReader(io.StringIO(csv_text))
+    ad_ids_in_csv = set()
+    for row in pre_reader:
+        if "Cash" not in (row.get("accounting_mode") or ""):
+            continue
+        ad_id = (row.get("ad_id") or "").strip()
+        if ad_id.isdigit():
+            ad_ids_in_csv.add(ad_id)
+    print(f"  {len(ad_ids_in_csv)} unique numeric ad_ids in CSV")
 
-    print("Enriching with Meta ad previews…")
+    print("Fetching Meta ad previews + names…")
     meta_token = os.environ.get("META_ACCESS_TOKEN", "")
     meta_account = os.environ.get("META_AD_ACCOUNT_ID", "")
     cache = load_previews_cache(out_dir / "latest.json")
-    needed = {mid for ad in ads for mid in (ad.get("meta_ad_ids") or [])}
-    print(f"  cache has {len(cache)} links, {len(needed)} unique ad_ids in this refresh")
-    previews = fetch_meta_previews(meta_token, meta_account, needed, cache)
+    print(f"  cache has {len(cache)} entries from previous run")
+    previews = fetch_meta_previews(meta_token, meta_account, ad_ids_in_csv, cache)
+    meta_names = {ad_id: data["name"] for ad_id, data in previews.items() if data.get("name")}
+    print(f"  {len(meta_names)} ad names available for synthetic-name override")
+
+    print("Parsing & aggregating…")
+    ads = aggregate_rows(csv_text, mappings=mappings, meta_names=meta_names)
+    print(f"  {len(ads)} unique ads")
+
+    print("Attaching preview links + thumbnails to aggregated ads…")
     attached = 0
     thumbed = 0
     for ad in ads:
@@ -403,6 +458,9 @@ def main():
         "platforms": PLATFORMS,
         "ad_count": len(ads),
         "ads": ads,
+        # Persist per-ad-id Meta names so the next run's cache can rehydrate the
+        # synthetic-name override map without re-querying Meta for everything.
+        "meta_names": meta_names,
     }
 
     latest_path = out_dir / "latest.json"
