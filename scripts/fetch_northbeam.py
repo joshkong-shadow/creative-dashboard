@@ -366,6 +366,74 @@ def fetch_meta_previews(token: str, account_id: str, needed: set, cache: dict) -
     return result
 
 
+def batch_lookup_meta_names(token: str, ad_ids: set, batch_size: int = 50) -> dict:
+    """Direct ID-based batch lookup for ads that account-level pagination missed.
+
+    Some ad_ids never come back from /{account_id}/ads — they may be in a status
+    we don't request, in a sibling ad account the token can see but our query
+    isn't scoped to, or simply beyond whatever pagination cap Meta is enforcing.
+    Querying them directly by id sidesteps all of those: the Graph endpoint
+    /?ids=ID1,ID2,... returns metadata for any ad the token has read access to,
+    regardless of account scope or status filters.
+
+    Returns {ad_id: name}. Same retry-on-rate-limit pattern as the pagination
+    fetcher.
+    """
+    if not token or not ad_ids:
+        return {}
+    ids_list = list(ad_ids)
+    result: dict[str, str] = {}
+    rate_limit_retries = 0
+    max_rate_limit_retries = 3
+    base = "https://graph.facebook.com/v21.0"
+    i = 0
+    batches_done = 0
+    while i < len(ids_list):
+        batch = ids_list[i:i + batch_size]
+        ids_param = ",".join(batch)
+        url = f"{base}/?ids={ids_param}&fields=id,name&access_token={token}"
+        try:
+            with urlreq.urlopen(url, timeout=60) as r:
+                body = json.loads(r.read().decode())
+        except HTTPError as e:
+            err_body = e.read().decode()[:300]
+            is_rate_limit = (
+                e.code == 400
+                and ("too many calls" in err_body.lower() or '80004' in err_body)
+            )
+            if is_rate_limit and rate_limit_retries < max_rate_limit_retries:
+                rate_limit_retries += 1
+                wait = 900 * rate_limit_retries  # 15, 30, 45 min
+                print(f"  Batch lookup rate-limited (attempt {rate_limit_retries}/{max_rate_limit_retries}) — sleeping {wait//60} min, resuming on same batch")
+                time.sleep(wait)
+                continue  # don't advance i — retry same batch
+            print(f"  Batch lookup HTTP {e.code} on batch {batches_done+1}: {err_body[:160]}")
+            i += batch_size
+            batches_done += 1
+            continue
+        except Exception as e:
+            print(f"  Batch lookup error: {type(e).__name__}: {e}")
+            i += batch_size
+            batches_done += 1
+            continue
+        # Body is {ad_id: {"id": ..., "name": ...}} OR {ad_id: {"error": {...}}}
+        for ad_id, data in body.items():
+            if not isinstance(data, dict):
+                continue
+            if data.get("error"):
+                continue
+            name = data.get("name")
+            if name:
+                result[ad_id] = name
+        i += batch_size
+        batches_done += 1
+        if batches_done % 20 == 0:
+            print(f"  …batch {batches_done}, {len(result)} names recovered ({i}/{len(ids_list)} queried)")
+    total_batches = (len(ids_list) + batch_size - 1) // batch_size
+    print(f"  Batch lookup: {len(result)} names recovered across {total_batches} batches ({len(ids_list)} ids queried)")
+    return result
+
+
 def load_previews_cache(path: pathlib.Path) -> dict:
     """Rebuild the ad_id→{preview_link, thumbnail_url, name} map from the previous
     manifest. The per-ad name lives in `meta_names` (a parallel dict keyed by
@@ -440,6 +508,23 @@ def main():
     cache = load_previews_cache(out_dir / "latest.json")
     print(f"  cache has {len(cache)} entries from previous run")
     previews = fetch_meta_previews(meta_token, meta_account, ad_ids_in_csv, cache)
+
+    # Fallback: account-level pagination consistently misses some ad_ids
+    # (different status, sibling account, pagination cap, etc). For those,
+    # query Meta by id directly — bypasses scoping/status filters entirely.
+    names_after_pagination = {ad_id for ad_id, data in previews.items() if data.get("name")}
+    missing_names = ad_ids_in_csv - names_after_pagination
+    if missing_names:
+        print(f"Direct batch-id lookup for {len(missing_names)} ad_ids missing names from pagination…")
+        recovered = batch_lookup_meta_names(meta_token, missing_names)
+        for ad_id, name in recovered.items():
+            if ad_id in previews:
+                previews[ad_id]["name"] = name
+            else:
+                # Name-only entry: no preview/thumb yet, but the name is enough
+                # to fix the synthetic-name override at parse time.
+                previews[ad_id] = {"preview_link": None, "thumbnail_url": None, "name": name}
+
     meta_names = {ad_id: data["name"] for ad_id, data in previews.items() if data.get("name")}
     print(f"  {len(meta_names)} ad names available for synthetic-name override")
 
@@ -452,14 +537,18 @@ def main():
     thumbed = 0
     for ad in ads:
         entries = [previews[x] for x in ad.get("meta_ad_ids", []) if x in previews]
-        if entries:
-            ad["preview_link"] = entries[0]["preview_link"]
-            thumb = next((e["thumbnail_url"] for e in entries if e.get("thumbnail_url")), None)
+        # Some entries may be name-only (preview_link=None) from the batch-id
+        # fallback; filter those out for link/thumb attachment so we don't
+        # overwrite a valid link with None when an ad has multiple meta_ad_ids.
+        link_entries = [e for e in entries if e.get("preview_link")]
+        if link_entries:
+            ad["preview_link"] = link_entries[0]["preview_link"]
+            thumb = next((e["thumbnail_url"] for e in link_entries if e.get("thumbnail_url")), None)
             if thumb:
                 ad["thumbnail_url"] = thumb
                 thumbed += 1
-            if len(entries) > 1:
-                ad["preview_links_all"] = [e["preview_link"] for e in entries]
+            if len(link_entries) > 1:
+                ad["preview_links_all"] = [e["preview_link"] for e in link_entries]
             attached += 1
     print(f"  attached preview_link to {attached}/{len(ads)} ads ({thumbed} with thumbnails)")
 
